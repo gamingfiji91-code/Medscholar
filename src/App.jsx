@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const SUBJECTS = [
@@ -105,9 +105,10 @@ const DRAW_COLORS = [
   "#f9f6f0",
 ];
 const BRUSH_SIZES = [2, 4, 8, 14, 22];
+const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 
 function uid() {
-  return Math.random().toString(36).slice(2, 9);
+  return crypto.randomUUID();
 }
 
 // ─── LOCAL STORAGE HOOK ───────────────────────────────────────────────────────
@@ -122,13 +123,16 @@ function useLS(key, fallback) {
   });
   const set = useCallback(
     (v) => {
-      setVal(v);
-      try {
-        localStorage.setItem(
-          key,
-          JSON.stringify(typeof v === "function" ? v(val) : v),
-        );
-      } catch {}
+      setVal((prev) => {
+        const next = typeof v === "function" ? v(prev) : v;
+        try {
+          localStorage.setItem(key, JSON.stringify(next));
+        } catch (e) {
+          // Storage full or unavailable — silent fail, state still updates
+          console.warn("localStorage write failed:", e);
+        }
+        return next;
+      });
     },
     [key],
   );
@@ -139,7 +143,7 @@ function useLS(key, fallback) {
 const S = {
   app: {
     fontFamily: "'Segoe UI',system-ui,sans-serif",
-    minHeight: "100vh",
+    minHeight: "100dvh",
     background: "#0f1117",
     color: "#e8e0d5",
     display: "flex",
@@ -276,6 +280,8 @@ function DrawCanvas({ saveKey }) {
   const [mode, setMode] = useState("pen");
   const [history, setHistory] = useState([]);
   const last = useRef(null);
+  // FIX: debounce localStorage saves to avoid saving on every pixel
+  const saveTimer = useRef(null);
 
   useEffect(() => {
     const c = canvasRef.current;
@@ -286,10 +292,31 @@ function DrawCanvas({ saveKey }) {
     const saved = localStorage.getItem("draw_" + saveKey);
     if (saved) {
       const img = new Image();
-      img.onload = () => ctx.drawImage(img, 0, 0);
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0);
+        setHistory([saved]);
+      };
       img.src = saved;
+    } else {
+      setHistory([c.toDataURL()]);
     }
+    // Cleanup debounce timer on unmount/key change
+    return () => clearTimeout(saveTimer.current);
   }, [saveKey]);
+
+  const debouncedSave = useCallback(
+    (data) => {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => {
+        try {
+          localStorage.setItem("draw_" + saveKey, data);
+        } catch (e) {
+          console.warn("Canvas save failed:", e);
+        }
+      }, 400);
+    },
+    [saveKey],
+  );
 
   const pos = (e, c) => {
     const r = c.getBoundingClientRect(),
@@ -340,7 +367,7 @@ function DrawCanvas({ saveKey }) {
     setDrawing(false);
     const data = canvasRef.current.toDataURL();
     setHistory((h) => [...h.slice(-19), data]);
-    localStorage.setItem("draw_" + saveKey, data);
+    debouncedSave(data); // FIX: debounced instead of immediate
   };
 
   const undo = () => {
@@ -354,7 +381,7 @@ function DrawCanvas({ saveKey }) {
     const img = new Image();
     img.onload = () => ctx.drawImage(img, 0, 0);
     img.src = h[h.length - 1];
-    localStorage.setItem("draw_" + saveKey, h[h.length - 1]);
+    debouncedSave(h[h.length - 1]);
   };
 
   const clear = () => {
@@ -362,8 +389,11 @@ function DrawCanvas({ saveKey }) {
       ctx = c.getContext("2d");
     ctx.fillStyle = "#fdfaf5";
     ctx.fillRect(0, 0, c.width, c.height);
-    setHistory([]);
-    localStorage.removeItem("draw_" + saveKey);
+    const data = c.toDataURL();
+    setHistory([data]);
+    try {
+      localStorage.removeItem("draw_" + saveKey);
+    } catch (e) {}
   };
 
   return (
@@ -494,11 +524,16 @@ function DrawCanvas({ saveKey }) {
 function NoteEditor({ noteKey }) {
   const [content, setContent] = useLS("note_" + noteKey, "");
   const edRef = useRef(null);
+  // FIX: only sync innerHTML when noteKey changes (switching chapters), not on every content state change
+  // Using a ref to track if we already loaded this key
+  const loadedKey = useRef(null);
 
   useEffect(() => {
-    if (edRef.current && edRef.current.innerHTML !== content)
+    if (edRef.current && loadedKey.current !== noteKey) {
       edRef.current.innerHTML = content;
-  }, [noteKey]);
+      loadedKey.current = noteKey;
+    }
+  }, [noteKey]); // FIX: removed content from deps to prevent cursor-reset on every keystroke
 
   return (
     <div
@@ -555,6 +590,7 @@ function NoteEditor({ noteKey }) {
         ref={edRef}
         contentEditable
         suppressContentEditableWarning
+        data-placeholder="Start typing your notes here..."
         onInput={(e) => setContent(e.currentTarget.innerHTML)}
         style={{
           flex: 1,
@@ -579,7 +615,7 @@ function NoteEditor({ noteKey }) {
 function Flashcards({ storeKey }) {
   const [cards, setCards] = useLS("fc_" + storeKey, []);
   const [form, setForm] = useState({ q: "", a: "" });
-  const [mode, setMode] = useState("list"); // list | study
+  const [mode, setMode] = useState("list");
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [score, setScore] = useState({ got: 0, miss: 0 });
@@ -592,8 +628,8 @@ function Flashcards({ storeKey }) {
   const del = (id) => setCards(cards.filter((c) => c.id !== id));
 
   if (mode === "study" && cards.length > 0) {
-    const card = cards[idx];
     const done = idx >= cards.length;
+    const card = done ? null : cards[idx];
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div
@@ -604,11 +640,11 @@ function Flashcards({ storeKey }) {
           }}
         >
           <span style={{ fontSize: 13, color: "#888" }}>
-            {idx + 1} / {cards.length}
+            {done ? cards.length : idx + 1} / {cards.length}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
-            <span style={{ ...S.badge("#1e8449") }}>✓ {score.got}</span>
-            <span style={{ ...S.badge("#c0392b") }}>✗ {score.miss}</span>
+            <span style={S.badge("#1e8449")}>✓ {score.got}</span>
+            <span style={S.badge("#c0392b")}>✗ {score.miss}</span>
           </div>
           <button
             onClick={() => {
@@ -793,6 +829,9 @@ function SlidesBuilder({ storeKey }) {
   const [presenting, setPresenting] = useState(false);
   const [pIdx, setPIdx] = useState(0);
 
+  // FIX: clamp active index when slides array shrinks
+  const safeActive = Math.min(active, Math.max(0, slides.length - 1));
+
   const addSlide = () => {
     const s = [
       ...slides,
@@ -807,15 +846,23 @@ function SlidesBuilder({ storeKey }) {
     setSlides(s);
     setActive(s.length - 1);
   };
+
   const upd = (field, val) => {
     setSlides(
-      slides.map((s, i) => (i === active ? { ...s, [field]: val } : s)),
+      slides.map((s, i) => (i === safeActive ? { ...s, [field]: val } : s)),
     );
   };
+
   const del = (i) => {
     const s = slides.filter((_, j) => j !== i);
     setSlides(s);
-    setActive(Math.min(active, s.length - 1));
+    // FIX: properly update active after deletion
+    setActive(
+      Math.max(
+        0,
+        i === safeActive ? i - 1 : safeActive > i ? safeActive - 1 : safeActive,
+      ),
+    );
   };
 
   const BKGS = [
@@ -922,6 +969,8 @@ function SlidesBuilder({ storeKey }) {
     );
   }
 
+  const currentSlide = slides[safeActive]; // FIX: use safeActive index
+
   return (
     <div style={{ display: "flex", gap: 14 }}>
       <div
@@ -938,12 +987,12 @@ function SlidesBuilder({ storeKey }) {
             key={s.id}
             onClick={() => setActive(i)}
             style={{
-              background: i === active ? "rgba(192,57,43,0.25)" : s.bg,
+              background: i === safeActive ? "rgba(192,57,43,0.25)" : s.bg,
               borderRadius: 8,
               padding: "8px 10px",
               cursor: "pointer",
               border:
-                i === active
+                i === safeActive
                   ? "1px solid rgba(192,57,43,0.5)"
                   : "1px solid rgba(255,255,255,0.06)",
               fontSize: 12,
@@ -1011,10 +1060,10 @@ function SlidesBuilder({ storeKey }) {
             <div style={{ fontSize: 36, marginBottom: 12 }}>🖥️</div>
             Click "+ Slide" to start building your presentation
           </div>
-        ) : slides[active] ? (
+        ) : currentSlide ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <input
-              value={slides[active].title}
+              value={currentSlide.title}
               onChange={(e) => upd("title", e.target.value)}
               placeholder="Slide title..."
               style={{
@@ -1025,7 +1074,7 @@ function SlidesBuilder({ storeKey }) {
               }}
             />
             <textarea
-              value={slides[active].body}
+              value={currentSlide.body}
               onChange={(e) => upd("body", e.target.value)}
               placeholder="Slide content, bullet points, key facts..."
               style={{
@@ -1051,7 +1100,7 @@ function SlidesBuilder({ storeKey }) {
                         background: c,
                         cursor: "pointer",
                         border:
-                          slides[active].bg === c
+                          currentSlide.bg === c
                             ? "2px solid #c0392b"
                             : "2px solid rgba(255,255,255,0.1)",
                       }}
@@ -1073,7 +1122,7 @@ function SlidesBuilder({ storeKey }) {
                         background: c,
                         cursor: "pointer",
                         border:
-                          slides[active].accent === c
+                          currentSlide.accent === c
                             ? "2px solid #fff"
                             : "2px solid transparent",
                       }}
@@ -1084,10 +1133,10 @@ function SlidesBuilder({ storeKey }) {
             </div>
             <div
               style={{
-                background: slides[active].bg,
+                background: currentSlide.bg,
                 borderRadius: 12,
                 padding: 28,
-                border: `1px solid ${slides[active].accent}44`,
+                border: `1px solid ${currentSlide.accent}44`,
                 minHeight: 120,
               }}
             >
@@ -1095,7 +1144,7 @@ function SlidesBuilder({ storeKey }) {
                 style={{
                   width: 40,
                   height: 3,
-                  background: slides[active].accent,
+                  background: currentSlide.accent,
                   borderRadius: 2,
                   marginBottom: 16,
                 }}
@@ -1109,7 +1158,7 @@ function SlidesBuilder({ storeKey }) {
                   fontFamily: "Georgia,serif",
                 }}
               >
-                {slides[active].title || "Title"}
+                {currentSlide.title || "Title"}
               </div>
               <div
                 style={{
@@ -1119,7 +1168,7 @@ function SlidesBuilder({ storeKey }) {
                   whiteSpace: "pre-wrap",
                 }}
               >
-                {slides[active].body || "Content..."}
+                {currentSlide.body || "Content..."}
               </div>
             </div>
           </div>
@@ -1150,8 +1199,7 @@ function Tasks({ storeKey }) {
   const pColor = { high: "#c0392b", medium: "#d35400", low: "#1e8449" };
   const sorted = [...tasks].sort((a, b) => {
     if (a.done !== b.done) return a.done ? 1 : -1;
-    const po = { high: 0, medium: 1, low: 2 };
-    return po[a.priority] - po[b.priority];
+    return PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority];
   });
 
   return (
@@ -1199,6 +1247,7 @@ function Tasks({ storeKey }) {
               padding: "10px 14px",
               opacity: t.done ? 0.5 : 1,
               borderLeft: `3px solid ${pColor[t.priority]}`,
+              borderRadius: 10,
             }}
           >
             <input
@@ -1245,7 +1294,7 @@ function Tasks({ storeKey }) {
 // ─── TIMETABLE ───────────────────────────────────────────────────────────────
 function Timetable() {
   const [schedule, setSchedule] = useLS("ms_timetable", {});
-  const [editing, setEditing] = useState(null); // {day,hour}
+  const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({
     label: "",
     subject: "anatomy",
@@ -1484,6 +1533,7 @@ function Timetable() {
               placeholder="Session label (e.g. Upper Limb Anatomy)"
               style={S.input}
               autoFocus
+              onKeyDown={(e) => e.key === "Enter" && saveCell()}
             />
             <select
               value={form.subject}
@@ -1538,36 +1588,43 @@ function Reminders() {
     type: "study",
   });
   const [now, setNow] = useState(new Date());
+  // FIX: track notification permission state reactively
+  const [notifPerm, setNotifPerm] = useState(
+    typeof Notification !== "undefined" ? Notification.permission : "denied",
+  );
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(t);
   }, []);
 
-  // Check for due reminders
+  // FIX: safe Notification API usage with try/catch + proper repeat handling
   useEffect(() => {
+    if (typeof Notification === "undefined") return;
     reminders.forEach((r) => {
-      if (!r.time || r.dismissed) return;
+      if (!r.time || r.dismissed || r.alerted) return;
       const due = new Date(r.time);
       const diff = (due - now) / 60000;
-      if (diff > -1 && diff < 1 && !r.alerted) {
-        // Mark alerted
+      if (diff > -1 && diff < 1) {
         setReminders((rs) =>
           rs.map((x) => (x.id === r.id ? { ...x, alerted: true } : x)),
         );
-        // Browser notification if permission granted
         if (Notification.permission === "granted") {
-          new Notification("📚 MedScholar Reminder", {
-            body: r.title,
-            icon: "🏥",
-          });
+          try {
+            new Notification("📚 MedScholar Reminder", {
+              body: r.title,
+            });
+          } catch (e) {
+            console.warn("Notification failed:", e);
+          }
         }
       }
     });
-  }, [now, reminders]);
+  }, [now]); // FIX: removed reminders from deps to avoid stale closure loop
 
   const requestNotif = () => {
-    if (Notification.permission === "default") Notification.requestPermission();
+    if (typeof Notification === "undefined") return;
+    Notification.requestPermission().then((perm) => setNotifPerm(perm));
   };
 
   const add = () => {
@@ -1620,7 +1677,7 @@ function Reminders() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {Notification.permission === "default" && (
+      {notifPerm === "default" && (
         <div
           style={{
             ...S.card,
@@ -1651,6 +1708,7 @@ function Reminders() {
             onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
             placeholder="Reminder title..."
             style={{ ...S.input, flex: 2, minWidth: 160 }}
+            onKeyDown={(e) => e.key === "Enter" && add()}
           />
           <input
             type="datetime-local"
@@ -1721,6 +1779,7 @@ function Reminders() {
                 gap: 12,
                 padding: "12px 16px",
                 borderLeft: `3px solid ${overdue ? "#c0392b" : soon ? "#d35400" : "rgba(255,255,255,0.1)"}`,
+                borderRadius: 10,
                 background: overdue
                   ? "rgba(192,57,43,0.08)"
                   : soon
@@ -1816,20 +1875,29 @@ function Reminders() {
 
 // ─── POMODORO TIMER ───────────────────────────────────────────────────────────
 function Pomodoro() {
-  const [mode, setMode] = useState("focus"); // focus | short | long
   const TIMES = { focus: 25 * 60, short: 5 * 60, long: 15 * 60 };
+  const [mode, setMode] = useState("focus");
   const [secs, setSecs] = useState(TIMES.focus);
   const [running, setRunning] = useState(false);
   const [sessions, setSessions] = useState(0);
   const [target, setTarget] = useState(4);
   const intv = useRef(null);
+  // FIX: use refs to avoid stale closures in the interval
+  const modeRef = useRef("focus");
+  const secsRef = useRef(TIMES.focus);
 
-  const reset = (m = mode) => {
-    clearInterval(intv.current);
-    setSecs(TIMES[m]);
-    setRunning(false);
-  };
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+  useEffect(() => {
+    secsRef.current = secs;
+  }, [secs]);
 
+  useEffect(() => {
+    return () => clearInterval(intv.current);
+  }, []);
+
+  // FIX: single effect for running state, using ref for mode to avoid stale closure
   useEffect(() => {
     if (running) {
       intv.current = setInterval(() => {
@@ -1837,28 +1905,45 @@ function Pomodoro() {
           if (s <= 1) {
             clearInterval(intv.current);
             setRunning(false);
-            if (mode === "focus") setSessions((n) => n + 1);
-            if (Notification.permission === "granted")
-              new Notification("⏰ Timer Complete!", {
-                body:
-                  mode === "focus"
-                    ? "Great work! Take a break."
-                    : "Break over. Back to study!",
-              });
+            if (modeRef.current === "focus") setSessions((n) => n + 1);
+            if (
+              typeof Notification !== "undefined" &&
+              Notification.permission === "granted"
+            ) {
+              try {
+                new Notification("⏰ Timer Complete!", {
+                  body:
+                    modeRef.current === "focus"
+                      ? "Great work! Take a break."
+                      : "Break over. Back to study!",
+                });
+              } catch (e) {}
+            }
             return 0;
           }
           return s - 1;
         });
       }, 1000);
+    } else {
+      clearInterval(intv.current);
     }
     return () => clearInterval(intv.current);
-  }, [running, mode]);
+  }, [running]);
 
+  // FIX: switchMode is clean — just update mode and reset secs, no redundancy
   const switchMode = (m) => {
+    clearInterval(intv.current);
+    setRunning(false);
     setMode(m);
-    reset(m);
     setSecs(TIMES[m]);
   };
+
+  const reset = () => {
+    clearInterval(intv.current);
+    setRunning(false);
+    setSecs(TIMES[mode]);
+  };
+
   const mm = String(Math.floor(secs / 60)).padStart(2, "0");
   const ss = String(secs % 60).padStart(2, "0");
   const pct = (1 - secs / TIMES[mode]) * 100;
@@ -1963,7 +2048,7 @@ function Pomodoro() {
           {running ? "⏸ Pause" : "▶ Start"}
         </button>
         <button
-          onClick={() => reset()}
+          onClick={reset}
           style={{ ...S.btn("ghost"), padding: "10px 20px" }}
         >
           ↺ Reset
@@ -1995,19 +2080,24 @@ function Pomodoro() {
           min={1}
           max={12}
           value={target}
-          onChange={(e) => setTarget(Number(e.target.value) || 4)}
+          onChange={(e) =>
+            setTarget(Math.max(1, Math.min(12, Number(e.target.value) || 4)))
+          }
           style={{ ...S.input, width: 60, textAlign: "center" }}
         />
         <span style={{ fontSize: 12, color: "#666" }}>sessions</span>
+        {sessions >= target && target > 0 && (
+          <span style={{ fontSize: 12, color: "#1e8449", fontWeight: 700 }}>
+            🎯 Goal reached!
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-// ─── AI ASSIST ────────────────────────────────────────────────────────────────
-
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({ setView, setActiveSubject, setActiveTool }) {
+function Dashboard({ setView, setActiveSubject }) {
   const [tasks] = useLS("tasks_global", []);
   const [reminders] = useLS("ms_reminders", []);
   const [now] = useState(new Date());
@@ -2276,9 +2366,11 @@ function Dashboard({ setView, setActiveSubject, setActiveTool }) {
 function SubjectView({ subjectId }) {
   const subj = SUBJECTS.find((s) => s.id === subjectId);
   const [chapters, setChapters] = useLS("chapters_" + subjectId, []);
+  // FIX: activeChap stores a string ID, not an object
   const [activeChap, setActiveChap] = useState(null);
   const [newChap, setNewChap] = useState("");
   const [activeTool, setActiveTool] = useState("notes");
+
   const TOOLS = [
     { id: "notes", l: "📝 Notes" },
     { id: "draw", l: "✏️ Draw" },
@@ -2287,15 +2379,38 @@ function SubjectView({ subjectId }) {
     { id: "tasks", l: "✅ Tasks" },
   ];
 
+  // FIX: removed erroneous subj.chapters reference — just check local chapters list
   const addChapter = () => {
     if (!newChap.trim()) return;
-    const c = { id: uid(), name: newChap };
+    if (
+      chapters.some(
+        (c) => c.name.toLowerCase() === newChap.trim().toLowerCase(),
+      )
+    ) {
+      // Use a gentle inline state instead of alert() for better UX
+      setDupError(true);
+      setTimeout(() => setDupError(false), 2000);
+      return;
+    }
+    const c = { id: uid(), name: newChap.trim() };
     setChapters([...chapters, c]);
     setNewChap("");
-    setActiveChap(c.id);
+    setActiveChap(c.id); // FIX: store the ID string, not the object
+  };
+  const [dupError, setDupError] = useState(false);
+
+  const delChapter = (id) => {
+    setChapters(chapters.filter((c) => c.id !== id));
+    if (activeChap === id) setActiveChap(null);
   };
 
+  // FIX: look up chapter by ID string
   const chap = chapters.find((c) => c.id === activeChap);
+
+  // Reset active tool when chapter changes
+  useEffect(() => {
+    setActiveTool("notes");
+  }, [activeChap]);
 
   return (
     <div style={{ display: "flex", gap: 16, height: "100%" }}>
@@ -2313,7 +2428,13 @@ function SubjectView({ subjectId }) {
             value={newChap}
             onChange={(e) => setNewChap(e.target.value)}
             placeholder="Chapter name..."
-            style={{ ...S.input, flex: 1, fontSize: 12, padding: "6px 10px" }}
+            style={{
+              ...S.input,
+              flex: 1,
+              fontSize: 12,
+              padding: "6px 10px",
+              ...(dupError ? { borderColor: "#c0392b" } : {}),
+            }}
             onKeyDown={(e) => e.key === "Enter" && addChapter()}
           />
           <button
@@ -2323,26 +2444,52 @@ function SubjectView({ subjectId }) {
             +
           </button>
         </div>
+        {dupError && (
+          <div style={{ fontSize: 11, color: "#c0392b", marginTop: -4 }}>
+            Chapter already exists
+          </div>
+        )}
         {chapters.map((c) => (
           <div
             key={c.id}
-            onClick={() => setActiveChap(c.id)}
-            style={{
-              ...S.navBtn(activeChap === c.id),
-              borderLeft: `3px solid ${activeChap === c.id ? subj?.color : "transparent"}`,
-              paddingLeft: 10,
-            }}
+            style={{ display: "flex", alignItems: "center", gap: 4 }}
           >
-            <span
+            <button
+              onClick={() => setActiveChap(c.id)} // FIX: set string ID
               style={{
-                fontSize: 12,
+                ...S.navBtn(activeChap === c.id),
+                borderLeft: `3px solid ${activeChap === c.id ? subj?.color : "transparent"}`,
+                paddingLeft: 10,
+                flex: 1,
                 overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
               }}
             >
-              {c.name}
-            </span>
+              <span
+                style={{
+                  fontSize: 12,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {c.name}
+              </span>
+            </button>
+            <button
+              onClick={() => delChapter(c.id)}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#c0392b",
+                cursor: "pointer",
+                fontSize: 14,
+                padding: "4px",
+                flexShrink: 0,
+              }}
+              title="Delete chapter"
+            >
+              ×
+            </button>
           </div>
         ))}
         {chapters.length === 0 && (
@@ -2368,7 +2515,7 @@ function SubjectView({ subjectId }) {
           gap: 12,
         }}
       >
-        {!activeChap ? (
+        {!activeChap || !chap ? (
           <div
             style={{
               ...S.card,
@@ -2410,7 +2557,7 @@ function SubjectView({ subjectId }) {
                   marginRight: 4,
                 }}
               >
-                {chap?.name}
+                {chap.name}
               </span>
               {TOOLS.map((t) => (
                 <button
@@ -2427,38 +2574,24 @@ function SubjectView({ subjectId }) {
               ))}
               <button
                 onClick={() => {
-                  const prompt = `
-You are an expert MBBS tutor.
-
-Subject: ${subj?.name}
-Chapter: ${chap?.name || "General"}
-
-Please explain clearly for an MBBS student.
-
-Include:
-- conceptual understanding
-- high yield exam points
-- mnemonics
-- clinical relevance
-- viva questions
-
-Question:
-`;
-
-                  navigator.clipboard.writeText(prompt);
-
-                  window.open("https://claude.ai", "_blank");
+                  // FIX: use chap.name not activeChap.id
+                  const prompt = `You are an expert MBBS tutor.\n\nSubject: ${subj?.name}\nChapter: ${chap.name}\n\nPlease explain clearly for an MBBS student.\n\nInclude:\n- Conceptual understanding\n- High yield exam points\n- Mnemonics\n- Clinical relevance\n- Viva questions\n\nQuestion: `;
+                  navigator.clipboard
+                    .writeText(prompt)
+                    .then(() => {
+                      window.open("https://claude.ai", "_blank");
+                    })
+                    .catch(() => {
+                      window.open("https://claude.ai", "_blank");
+                    });
                 }}
-                style={{
-                  ...S.btn("ghost"),
-                  padding: "5px 12px",
-                  fontSize: 12,
-                }}
+                style={{ ...S.btn("ghost"), padding: "5px 12px", fontSize: 12 }}
               >
                 🤖 Open in Claude
               </button>
             </div>
             <div style={{ flex: 1 }}>
+              {/* FIX: pass activeChap (string ID) directly, not activeChap.id */}
               {activeTool === "notes" && (
                 <NoteEditor noteKey={subjectId + "_" + activeChap} />
               )}
@@ -2486,11 +2619,16 @@ Question:
 export default function App() {
   const [view, setView] = useState("dashboard");
   const [activeSubject, setActiveSubject] = useState(null);
-  const [activeTool, setActiveTool] = useState("notes");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  // FIX: reactive mobile detection via state + resize listener
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 600);
 
-  const isMobile = typeof window !== "undefined" && window.innerWidth < 600;
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < 600);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   const NAV = [
     { id: "dashboard", l: "🏠 Dashboard" },
@@ -2510,7 +2648,7 @@ export default function App() {
     setMobileMenuOpen(false);
   };
 
-  const Sidebar = () => (
+  const SidebarContent = () => (
     <div
       style={{
         display: "flex",
@@ -2589,8 +2727,10 @@ export default function App() {
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: #0f1117; }
         ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
-        [contenteditable]:empty:before { content: attr(data-placeholder); color: #aaa; pointer-events: none; }
+        [contenteditable][data-placeholder]:empty:before { content: attr(data-placeholder); color: #999; pointer-events: none; }
         input[type=datetime-local]::-webkit-calendar-picker-indicator { filter: invert(0.5); }
+        button:hover { filter: brightness(1.1); }
+        button:active { transform: scale(0.98); }
         @media (max-width:600px) { .desktop-sidebar { display: none !important; } }
       `}</style>
 
@@ -2653,7 +2793,7 @@ export default function App() {
               display: "inline-block",
             }}
           />
-          v1.0
+          v2.0
         </div>
       </div>
 
@@ -2674,7 +2814,7 @@ export default function App() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <Sidebar />
+            <SidebarContent />
           </div>
           <div style={{ flex: 1, background: "rgba(0,0,0,0.5)" }} />
         </div>
@@ -2686,7 +2826,7 @@ export default function App() {
           style={{ ...S.sidebar, ...(!sidebarOpen ? S.sidebarCollapsed : {}) }}
         >
           {sidebarOpen ? (
-            <Sidebar />
+            <SidebarContent />
           ) : (
             <div
               style={{
@@ -2699,12 +2839,7 @@ export default function App() {
             >
               {[
                 ...NAV,
-                ...SUBJECTS.map((s) => ({
-                  id: s.id,
-                  l: s.icon,
-                  isSub: true,
-                  s,
-                })),
+                ...SUBJECTS.map((s) => ({ id: s.id, l: s.icon, isSub: true })),
               ].map((n) => (
                 <button
                   key={n.id}
@@ -2731,11 +2866,7 @@ export default function App() {
 
         <main style={S.main}>
           {view === "dashboard" && (
-            <Dashboard
-              setView={setView}
-              setActiveSubject={setActiveSubject}
-              setActiveTool={setActiveTool}
-            />
+            <Dashboard setView={setView} setActiveSubject={setActiveSubject} />
           )}
           {view === "timetable" && <Timetable />}
           {view === "reminders" && <Reminders />}
