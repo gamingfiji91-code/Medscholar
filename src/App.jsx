@@ -1,85 +1,102 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useReducer,
+  memo,
+} from "react";
+
+// ─── SCHEMA VERSION ───────────────────────────────────────────────────────────
+const SCHEMA_VERSION = 2;
+
+function runMigrations() {
+  try {
+    const stored = parseInt(
+      localStorage.getItem("ms_schema_version") || "1",
+      10,
+    );
+    if (stored < 2) {
+      // v1 → v2: nothing to migrate structurally, just stamp the version
+      localStorage.setItem("ms_schema_version", String(SCHEMA_VERSION));
+    }
+  } catch (e) {
+    console.warn("Migration error:", e);
+  }
+}
+runMigrations();
+
+// ─── INDEXEDDB HOOK (replaces localStorage for drawings) ─────────────────────
+const IDB_NAME = "medscholar_db";
+const IDB_STORE = "drawings";
+
+function openIDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = (e) => {
+      e.target.result.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbGet(key) {
+  try {
+    const db = await openIDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function idbSet(key, val) {
+  try {
+    const db = await openIDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(val, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function idbDel(key) {
+  try {
+    const db = await openIDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).delete(key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch {
+    return false;
+  }
+}
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const SUBJECTS = [
-  {
-    id: "anatomy",
-    name: "Anatomy",
-    color: "#c0392b",
-    light: "#fdecea",
-    icon: "🫀",
-  },
-  {
-    id: "physiology",
-    name: "Physiology",
-    color: "#2471a3",
-    light: "#eaf4fb",
-    icon: "⚡",
-  },
-  {
-    id: "biochemistry",
-    name: "Biochemistry",
-    color: "#1e8449",
-    light: "#eafaf1",
-    icon: "🧬",
-  },
-  {
-    id: "pathology",
-    name: "Pathology",
-    color: "#7d3c98",
-    light: "#f5eef8",
-    icon: "🔬",
-  },
-  {
-    id: "pharmacology",
-    name: "Pharmacology",
-    color: "#d35400",
-    light: "#fef5ec",
-    icon: "💊",
-  },
-  {
-    id: "microbiology",
-    name: "Microbiology",
-    color: "#148f77",
-    light: "#e8f8f5",
-    icon: "🦠",
-  },
-  {
-    id: "medicine",
-    name: "Medicine",
-    color: "#2c3e50",
-    light: "#eaecee",
-    icon: "🏥",
-  },
-  {
-    id: "surgery",
-    name: "Surgery",
-    color: "#626567",
-    light: "#f2f3f4",
-    icon: "🔪",
-  },
-  { id: "obg", name: "OB/GYN", color: "#c0392b", light: "#fdecea", icon: "👶" },
-  {
-    id: "pediatrics",
-    name: "Pediatrics",
-    color: "#1a5276",
-    light: "#eaf2ff",
-    icon: "🧒",
-  },
-  {
-    id: "psychiatry",
-    name: "Psychiatry",
-    color: "#6c3483",
-    light: "#f4ecf7",
-    icon: "🧠",
-  },
-  {
-    id: "radiology",
-    name: "Radiology",
-    color: "#1b2631",
-    light: "#e8eaed",
-    icon: "🩻",
-  },
+  { id: "anatomy", name: "Anatomy", color: "#c0392b", icon: "🫀" },
+  { id: "physiology", name: "Physiology", color: "#2471a3", icon: "⚡" },
+  { id: "biochemistry", name: "Biochemistry", color: "#1e8449", icon: "🧬" },
+  { id: "pathology", name: "Pathology", color: "#7d3c98", icon: "🔬" },
+  { id: "pharmacology", name: "Pharmacology", color: "#d35400", icon: "💊" },
+  { id: "microbiology", name: "Microbiology", color: "#148f77", icon: "🦠" },
+  { id: "medicine", name: "Medicine", color: "#2c3e50", icon: "🏥" },
+  { id: "surgery", name: "Surgery", color: "#626567", icon: "🔪" },
+  { id: "obg", name: "OB/GYN", color: "#c0392b", icon: "👶" },
+  { id: "pediatrics", name: "Pediatrics", color: "#1a5276", icon: "🧒" },
+  { id: "psychiatry", name: "Psychiatry", color: "#6c3483", icon: "🧠" },
+  { id: "radiology", name: "Radiology", color: "#1b2631", icon: "🩻" },
 ];
 
 const DAYS = [
@@ -91,7 +108,7 @@ const DAYS = [
   "Saturday",
   "Sunday",
 ];
-const HOURS = Array.from({ length: 15 }, (_, i) => i + 7); // 7am–9pm
+const HOURS = Array.from({ length: 15 }, (_, i) => i + 7);
 const DRAW_COLORS = [
   "#1a1a2e",
   "#c0392b",
@@ -128,7 +145,6 @@ function useLS(key, fallback) {
         try {
           localStorage.setItem(key, JSON.stringify(next));
         } catch (e) {
-          // Storage full or unavailable — silent fail, state still updates
           console.warn("localStorage write failed:", e);
         }
         return next;
@@ -137,6 +153,134 @@ function useLS(key, fallback) {
     [key],
   );
   return [val, set];
+}
+
+// ─── SM-2 SPACED REPETITION ───────────────────────────────────────────────────
+function sm2Update(card, quality) {
+  // quality: 5=perfect, 4=correct, 3=correct with difficulty, 2=missed
+  const q = quality;
+  let { easiness = 2.5, interval = 1, repetitions = 0 } = card;
+  if (q >= 3) {
+    if (repetitions === 0) interval = 1;
+    else if (repetitions === 1) interval = 6;
+    else interval = Math.round(interval * easiness);
+    repetitions += 1;
+  } else {
+    repetitions = 0;
+    interval = 1;
+  }
+  easiness = Math.max(1.3, easiness + 0.1 - (5 - q) * (0.08 + (5 - q) * 0.02));
+  const due = Date.now() + interval * 24 * 60 * 60 * 1000;
+  return { ...card, easiness, interval, repetitions, due };
+}
+
+// ─── EXPORT / IMPORT BACKUP ───────────────────────────────────────────────────
+function exportBackup() {
+  const data = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k) continue;
+    try {
+      data[k] = JSON.parse(localStorage.getItem(k));
+    } catch {
+      data[k] = localStorage.getItem(k);
+    }
+  }
+  const blob = new Blob(
+    [
+      JSON.stringify(
+        { version: SCHEMA_VERSION, exportedAt: new Date().toISOString(), data },
+        null,
+        2,
+      ),
+    ],
+    { type: "application/json" },
+  );
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `medscholar-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importBackup(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        const data = parsed.data || parsed;
+        let count = 0;
+        Object.entries(data).forEach(([k, v]) => {
+          try {
+            localStorage.setItem(
+              k,
+              typeof v === "string" ? v : JSON.stringify(v),
+            );
+            count++;
+          } catch {}
+        });
+        resolve(count);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(file);
+  });
+}
+
+// ─── ERROR BOUNDARY ───────────────────────────────────────────────────────────
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("MedScholar error:", error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, textAlign: "center", color: "#e8e0d5" }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>⚠️</div>
+          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
+            Something went wrong
+          </div>
+          <div
+            style={{
+              fontSize: 13,
+              color: "#888",
+              marginBottom: 20,
+              maxWidth: 400,
+              margin: "0 auto 20px",
+            }}
+          >
+            {this.state.error.message}
+          </div>
+          <button
+            onClick={() => this.setState({ error: null })}
+            style={{
+              padding: "10px 24px",
+              background: "rgba(192,57,43,0.85)",
+              border: "none",
+              borderRadius: 8,
+              color: "#fff",
+              fontSize: 14,
+              cursor: "pointer",
+            }}
+          >
+            Try Again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -159,6 +303,8 @@ const S = {
     height: 52,
     flexShrink: 0,
     zIndex: 100,
+    position: "sticky",
+    top: 0,
   },
   logo: {
     fontFamily: "Georgia,serif",
@@ -193,6 +339,7 @@ const S = {
     display: "flex",
     flexDirection: "column",
     gap: 16,
+    WebkitOverflowScrolling: "touch",
   },
   navBtn: (active) => ({
     display: "flex",
@@ -271,7 +418,7 @@ const S = {
   }),
 };
 
-// ─── DRAWING CANVAS ───────────────────────────────────────────────────────────
+// ─── DRAWING CANVAS (IndexedDB + compressed JPEG) ─────────────────────────────
 function DrawCanvas({ saveKey }) {
   const canvasRef = useRef(null);
   const [drawing, setDrawing] = useState(false);
@@ -279,8 +426,8 @@ function DrawCanvas({ saveKey }) {
   const [size, setSize] = useState(4);
   const [mode, setMode] = useState("pen");
   const [history, setHistory] = useState([]);
+  const [loaded, setLoaded] = useState(false);
   const last = useRef(null);
-  // FIX: debounce localStorage saves to avoid saving on every pixel
   const saveTimer = useRef(null);
 
   useEffect(() => {
@@ -289,34 +436,41 @@ function DrawCanvas({ saveKey }) {
     const ctx = c.getContext("2d");
     ctx.fillStyle = "#fdfaf5";
     ctx.fillRect(0, 0, c.width, c.height);
-    const saved = localStorage.getItem("draw_" + saveKey);
-    if (saved) {
-      const img = new Image();
-      img.onload = () => {
-        ctx.drawImage(img, 0, 0);
-        setHistory([saved]);
-      };
-      img.src = saved;
-    } else {
-      setHistory([c.toDataURL()]);
-    }
-    // Cleanup debounce timer on unmount/key change
+
+    // Load from IndexedDB instead of localStorage
+    idbGet("draw_" + saveKey).then((saved) => {
+      if (saved) {
+        const img = new Image();
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0);
+          setHistory([saved]);
+          setLoaded(true);
+        };
+        img.src = saved;
+      } else {
+        // Compress even the initial blank state as JPEG
+        setHistory([c.toDataURL("image/jpeg", 0.6)]);
+        setLoaded(true);
+      }
+    });
     return () => clearTimeout(saveTimer.current);
   }, [saveKey]);
 
+  // Debounced compressed save to IndexedDB
   const debouncedSave = useCallback(
     (data) => {
       clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
-        try {
-          localStorage.setItem("draw_" + saveKey, data);
-        } catch (e) {
-          console.warn("Canvas save failed:", e);
-        }
-      }, 400);
+        idbSet("draw_" + saveKey, data);
+      }, 500);
     },
     [saveKey],
   );
+
+  const compressedSnapshot = () => {
+    // Save as JPEG at 0.6 quality — ~10x smaller than PNG
+    return canvasRef.current.toDataURL("image/jpeg", 0.6);
+  };
 
   const pos = (e, c) => {
     const r = c.getBoundingClientRect(),
@@ -365,9 +519,9 @@ function DrawCanvas({ saveKey }) {
   const stop = () => {
     if (!drawing) return;
     setDrawing(false);
-    const data = canvasRef.current.toDataURL();
+    const data = compressedSnapshot();
     setHistory((h) => [...h.slice(-19), data]);
-    debouncedSave(data); // FIX: debounced instead of immediate
+    debouncedSave(data);
   };
 
   const undo = () => {
@@ -389,12 +543,19 @@ function DrawCanvas({ saveKey }) {
       ctx = c.getContext("2d");
     ctx.fillStyle = "#fdfaf5";
     ctx.fillRect(0, 0, c.width, c.height);
-    const data = c.toDataURL();
+    const data = compressedSnapshot();
     setHistory([data]);
-    try {
-      localStorage.removeItem("draw_" + saveKey);
-    } catch (e) {}
+    idbDel("draw_" + saveKey);
   };
+
+  if (!loaded)
+    return (
+      <div
+        style={{ ...S.card, textAlign: "center", padding: 40, color: "#555" }}
+      >
+        Loading canvas…
+      </div>
+    );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -485,9 +646,10 @@ function DrawCanvas({ saveKey }) {
         </button>
         <button
           onClick={() => {
+            // Export as full PNG for download (quality doesn't matter for export)
             const a = document.createElement("a");
             a.download = "diagram.png";
-            a.href = canvasRef.current.toDataURL();
+            a.href = canvasRef.current.toDataURL("image/png");
             a.click();
           }}
           style={{ ...S.btn("ghost"), padding: "4px 10px", fontSize: 13 }}
@@ -497,8 +659,8 @@ function DrawCanvas({ saveKey }) {
       </div>
       <canvas
         ref={canvasRef}
-        width={1400}
-        height={900}
+        width={900}
+        height={600}
         style={{
           width: "100%",
           borderRadius: 12,
@@ -506,7 +668,7 @@ function DrawCanvas({ saveKey }) {
           touchAction: "none",
           background: "#fdfaf5",
           display: "block",
-          maxHeight: 480,
+          maxHeight: 420,
         }}
         onMouseDown={start}
         onMouseMove={move}
@@ -524,8 +686,6 @@ function DrawCanvas({ saveKey }) {
 function NoteEditor({ noteKey }) {
   const [content, setContent] = useLS("note_" + noteKey, "");
   const edRef = useRef(null);
-  // FIX: only sync innerHTML when noteKey changes (switching chapters), not on every content state change
-  // Using a ref to track if we already loaded this key
   const loadedKey = useRef(null);
 
   useEffect(() => {
@@ -533,7 +693,7 @@ function NoteEditor({ noteKey }) {
       edRef.current.innerHTML = content;
       loadedKey.current = noteKey;
     }
-  }, [noteKey]); // FIX: removed content from deps to prevent cursor-reset on every keystroke
+  }, [noteKey]);
 
   return (
     <div
@@ -611,25 +771,56 @@ function NoteEditor({ noteKey }) {
   );
 }
 
-// ─── FLASHCARDS ───────────────────────────────────────────────────────────────
+// ─── FLASHCARDS (SM-2 spaced repetition) ─────────────────────────────────────
 function Flashcards({ storeKey }) {
   const [cards, setCards] = useLS("fc_" + storeKey, []);
   const [form, setForm] = useState({ q: "", a: "" });
   const [mode, setMode] = useState("list");
-  const [idx, setIdx] = useState(0);
+  const [studyQueue, setStudyQueue] = useState([]);
+  const [qIdx, setQIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [score, setScore] = useState({ got: 0, miss: 0 });
 
   const add = () => {
     if (!form.q.trim() || !form.a.trim()) return;
-    setCards([...cards, { id: uid(), q: form.q, a: form.a, due: Date.now() }]);
+    setCards([
+      ...cards,
+      {
+        id: uid(),
+        q: form.q,
+        a: form.a,
+        due: Date.now(),
+        easiness: 2.5,
+        interval: 1,
+        repetitions: 0,
+      },
+    ]);
     setForm({ q: "", a: "" });
   };
   const del = (id) => setCards(cards.filter((c) => c.id !== id));
 
-  if (mode === "study" && cards.length > 0) {
-    const done = idx >= cards.length;
-    const card = done ? null : cards[idx];
+  // Cards due now (or never studied yet)
+  const dueCards = cards.filter((c) => !c.due || c.due <= Date.now());
+  const allCards = cards;
+
+  const startStudy = (useAll = false) => {
+    const queue = useAll
+      ? [...cards]
+      : dueCards.length > 0
+        ? [...dueCards]
+        : [...cards];
+    // Sort: overdue first, then by easiness ascending (hardest first)
+    queue.sort((a, b) => (a.due || 0) - (b.due || 0));
+    setStudyQueue(queue);
+    setQIdx(0);
+    setFlipped(false);
+    setScore({ got: 0, miss: 0 });
+    setMode("study");
+  };
+
+  if (mode === "study") {
+    const done = qIdx >= studyQueue.length;
+    const card = done ? null : studyQueue[qIdx];
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div
@@ -640,21 +831,13 @@ function Flashcards({ storeKey }) {
           }}
         >
           <span style={{ fontSize: 13, color: "#888" }}>
-            {done ? cards.length : idx + 1} / {cards.length}
+            {done ? studyQueue.length : qIdx + 1} / {studyQueue.length}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
             <span style={S.badge("#1e8449")}>✓ {score.got}</span>
             <span style={S.badge("#c0392b")}>✗ {score.miss}</span>
           </div>
-          <button
-            onClick={() => {
-              setMode("list");
-              setIdx(0);
-              setFlipped(false);
-              setScore({ got: 0, miss: 0 });
-            }}
-            style={S.btn("ghost")}
-          >
+          <button onClick={() => setMode("list")} style={S.btn("ghost")}>
             ✕ Exit
           </button>
         </div>
@@ -667,82 +850,95 @@ function Flashcards({ storeKey }) {
             <div style={{ color: "#888", marginTop: 6 }}>
               Got {score.got} right, {score.miss} to review
             </div>
+            <div style={{ color: "#555", fontSize: 12, marginTop: 8 }}>
+              Next due cards scheduled by spaced repetition
+            </div>
             <button
-              onClick={() => {
-                setIdx(0);
-                setFlipped(false);
-                setScore({ got: 0, miss: 0 });
-              }}
+              onClick={() => setMode("list")}
               style={{ ...S.btn(), marginTop: 16 }}
             >
-              Restart
+              Back to list
             </button>
           </div>
         ) : (
-          <div
-            onClick={() => setFlipped((f) => !f)}
-            style={{
-              ...S.card,
-              minHeight: 200,
-              cursor: "pointer",
-              textAlign: "center",
-              padding: 36,
-              border: flipped
-                ? "1px solid rgba(30,132,73,0.4)"
-                : "1px solid rgba(255,255,255,0.06)",
-              transition: "all 0.3s",
-            }}
-          >
+          <>
             <div
+              onClick={() => setFlipped((f) => !f)}
               style={{
-                fontSize: 11,
-                color: "#666",
-                marginBottom: 12,
-                textTransform: "uppercase",
-                letterSpacing: 2,
+                ...S.card,
+                minHeight: 200,
+                cursor: "pointer",
+                textAlign: "center",
+                padding: 36,
+                border: flipped
+                  ? "1px solid rgba(30,132,73,0.4)"
+                  : "1px solid rgba(255,255,255,0.06)",
+                transition: "all 0.3s",
               }}
             >
-              {flipped ? "Answer" : "Question — tap to reveal"}
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "#555",
+                  marginBottom: 8,
+                  display: "flex",
+                  justifyContent: "space-between",
+                }}
+              >
+                <span style={{ textTransform: "uppercase", letterSpacing: 2 }}>
+                  {flipped ? "Answer" : "Question — tap to reveal"}
+                </span>
+                {card.interval > 1 && (
+                  <span style={S.badge("#2471a3")}>
+                    interval: {card.interval}d
+                  </span>
+                )}
+              </div>
+              <div
+                style={{
+                  fontSize: 18,
+                  lineHeight: 1.6,
+                  color: flipped ? "#7dcea0" : "#e8e0d5",
+                }}
+              >
+                {flipped ? card.a : card.q}
+              </div>
             </div>
-            <div
-              style={{
-                fontSize: 18,
-                lineHeight: 1.6,
-                color: flipped ? "#7dcea0" : "#e8e0d5",
-              }}
-            >
-              {flipped ? card.a : card.q}
-            </div>
-          </div>
-        )}
-        {flipped && !done && (
-          <div style={{ display: "flex", gap: 10 }}>
-            <button
-              onClick={() => {
-                setScore((s) => ({ ...s, miss: s.miss + 1 }));
-                setIdx((i) => i + 1);
-                setFlipped(false);
-              }}
-              style={{ ...S.btn("danger"), flex: 1, fontSize: 15 }}
-            >
-              ✗ Missed
-            </button>
-            <button
-              onClick={() => {
-                setScore((s) => ({ ...s, got: s.got + 1 }));
-                setIdx((i) => i + 1);
-                setFlipped(false);
-              }}
-              style={{
-                ...S.btn(),
-                flex: 1,
-                fontSize: 15,
-                background: "rgba(30,132,73,0.8)",
-              }}
-            >
-              ✓ Got it
-            </button>
-          </div>
+            {flipped && (
+              <div style={{ display: "flex", gap: 8 }}>
+                {[
+                  { label: "✗ Blackout", q: 0, color: "#8B0000" },
+                  { label: "Almost", q: 2, color: "#c0392b" },
+                  { label: "Hard", q: 3, color: "#d35400" },
+                  { label: "Good", q: 4, color: "#1a7a4a" },
+                  { label: "✓ Easy", q: 5, color: "#1e8449" },
+                ].map(({ label, q }) => (
+                  <button
+                    key={label}
+                    onClick={() => {
+                      const updated = sm2Update(card, q);
+                      setCards((prev) =>
+                        prev.map((c) => (c.id === card.id ? updated : c)),
+                      );
+                      if (q >= 3) setScore((s) => ({ ...s, got: s.got + 1 }));
+                      else setScore((s) => ({ ...s, miss: s.miss + 1 }));
+                      setQIdx((i) => i + 1);
+                      setFlipped(false);
+                    }}
+                    style={{
+                      ...S.btn(
+                        q >= 4 ? "primary" : q >= 3 ? "ghost" : "danger",
+                      ),
+                      flex: 1,
+                      fontSize: 12,
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     );
@@ -769,49 +965,81 @@ function Flashcards({ storeKey }) {
         </button>
       </div>
       {cards.length > 0 && (
-        <button
-          onClick={() => {
-            setMode("study");
-            setIdx(0);
-            setFlipped(false);
-            setScore({ got: 0, miss: 0 });
-          }}
-          style={{ ...S.btn(), width: "100%" }}
-        >
-          🎯 Start Study Session ({cards.length} cards)
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={() => startStudy(false)}
+            style={{ ...S.btn(), flex: 1 }}
+          >
+            🎯 Study Due ({dueCards.length > 0 ? dueCards.length : "all"} cards)
+          </button>
+          {dueCards.length > 0 && dueCards.length < cards.length && (
+            <button
+              onClick={() => startStudy(true)}
+              style={{ ...S.btn("ghost"), flex: 1 }}
+            >
+              Study All ({cards.length})
+            </button>
+          )}
+        </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {cards.map((c) => (
-          <div
-            key={c.id}
-            style={{
-              ...S.card,
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: 12,
-            }}
-          >
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                {c.q}
-              </div>
-              <div style={{ fontSize: 13, color: "#888" }}>{c.a}</div>
-            </div>
-            <button
-              onClick={() => del(c.id)}
+        {cards.map((c) => {
+          const isDue = !c.due || c.due <= Date.now();
+          const dueDate =
+            c.due && c.due > Date.now()
+              ? new Date(c.due).toLocaleDateString("en-IN", {
+                  day: "numeric",
+                  month: "short",
+                })
+              : null;
+          return (
+            <div
+              key={c.id}
               style={{
-                ...S.btn("danger"),
-                padding: "4px 8px",
-                fontSize: 12,
-                flexShrink: 0,
+                ...S.card,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                gap: 12,
               }}
             >
-              ✕
-            </button>
-          </div>
-        ))}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                  {c.q}
+                </div>
+                <div style={{ fontSize: 13, color: "#888" }}>{c.a}</div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#555",
+                    marginTop: 4,
+                    display: "flex",
+                    gap: 8,
+                  }}
+                >
+                  {isDue ? (
+                    <span style={{ color: "#d35400" }}>📅 Due now</span>
+                  ) : (
+                    <span>📅 Due {dueDate}</span>
+                  )}
+                  <span>Interval: {c.interval || 1}d</span>
+                  <span>Rep: {c.repetitions || 0}</span>
+                </div>
+              </div>
+              <button
+                onClick={() => del(c.id)}
+                style={{
+                  ...S.btn("danger"),
+                  padding: "4px 8px",
+                  fontSize: 12,
+                  flexShrink: 0,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          );
+        })}
         {cards.length === 0 && (
           <div style={{ textAlign: "center", color: "#555", padding: 30 }}>
             No flashcards yet. Add some above!
@@ -829,7 +1057,6 @@ function SlidesBuilder({ storeKey }) {
   const [presenting, setPresenting] = useState(false);
   const [pIdx, setPIdx] = useState(0);
 
-  // FIX: clamp active index when slides array shrinks
   const safeActive = Math.min(active, Math.max(0, slides.length - 1));
 
   const addSlide = () => {
@@ -846,17 +1073,13 @@ function SlidesBuilder({ storeKey }) {
     setSlides(s);
     setActive(s.length - 1);
   };
-
-  const upd = (field, val) => {
+  const upd = (field, val) =>
     setSlides(
       slides.map((s, i) => (i === safeActive ? { ...s, [field]: val } : s)),
     );
-  };
-
   const del = (i) => {
     const s = slides.filter((_, j) => j !== i);
     setSlides(s);
-    // FIX: properly update active after deletion
     setActive(
       Math.max(
         0,
@@ -969,8 +1192,7 @@ function SlidesBuilder({ storeKey }) {
     );
   }
 
-  const currentSlide = slides[safeActive]; // FIX: use safeActive index
-
+  const currentSlide = slides[safeActive];
   return (
     <div style={{ display: "flex", gap: 14 }}>
       <div
@@ -1195,12 +1417,14 @@ function Tasks({ storeKey }) {
   const toggle = (id) =>
     setTasks(tasks.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
   const del = (id) => setTasks(tasks.filter((t) => t.id !== id));
+  const clearDone = () => setTasks(tasks.filter((t) => !t.done));
 
   const pColor = { high: "#c0392b", medium: "#d35400", low: "#1e8449" };
   const sorted = [...tasks].sort((a, b) => {
     if (a.done !== b.done) return a.done ? 1 : -1;
     return PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority];
   });
+  const doneCount = tasks.filter((t) => t.done).length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1225,15 +1449,25 @@ function Tasks({ storeKey }) {
           Add
         </button>
       </div>
-      <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+      <div
+        style={{ display: "flex", gap: 10, fontSize: 12, alignItems: "center" }}
+      >
         {["high", "medium", "low"].map((p) => (
           <span key={p} style={S.badge(pColor[p])}>
             {tasks.filter((t) => t.priority === p && !t.done).length} {p}
           </span>
         ))}
         <span style={{ ...S.badge("#555"), marginLeft: "auto" }}>
-          {tasks.filter((t) => t.done).length}/{tasks.length} done
+          {doneCount}/{tasks.length} done
         </span>
+        {doneCount > 0 && (
+          <button
+            onClick={clearDone}
+            style={{ ...S.btn("ghost"), padding: "3px 10px", fontSize: 11 }}
+          >
+            Clear done
+          </button>
+        )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {sorted.map((t) => (
@@ -1291,7 +1525,97 @@ function Tasks({ storeKey }) {
   );
 }
 
-// ─── TIMETABLE ───────────────────────────────────────────────────────────────
+// ─── TIMETABLE (memoized cells) ───────────────────────────────────────────────
+const TimetableCell = memo(function TimetableCell({
+  cell,
+  subj,
+  onClick,
+  onClear,
+}) {
+  const typeColors = {
+    lecture: "#2471a3",
+    practical: "#1e8449",
+    tutorial: "#d35400",
+    self: "#7d3c98",
+    break: "#626567",
+  };
+  return (
+    <td
+      onClick={onClick}
+      style={{
+        padding: 3,
+        verticalAlign: "top",
+        cursor: "pointer",
+        position: "relative",
+      }}
+    >
+      {cell ? (
+        <div
+          style={{
+            background: typeColors[cell.type] + "22",
+            borderRadius: 6,
+            padding: "4px 6px",
+            borderLeft: `3px solid ${typeColors[cell.type]}`,
+            minHeight: 36,
+            fontSize: 11,
+            lineHeight: 1.4,
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 700,
+              color: "#e8e0d5",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {cell.label}
+          </div>
+          <div style={{ color: "#888", fontSize: 10 }}>
+            {subj?.icon} {subj?.name}
+          </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onClear();
+            }}
+            style={{
+              position: "absolute",
+              top: 3,
+              right: 3,
+              background: "transparent",
+              border: "none",
+              color: "#c0392b",
+              cursor: "pointer",
+              fontSize: 12,
+              lineHeight: 1,
+              padding: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ) : (
+        <div
+          style={{
+            borderRadius: 6,
+            minHeight: 36,
+            border: "1px dashed rgba(255,255,255,0.05)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "rgba(255,255,255,0.06)",
+            fontSize: 16,
+          }}
+        >
+          +
+        </div>
+      )}
+    </td>
+  );
+});
+
 function Timetable() {
   const [schedule, setSchedule] = useLS("ms_timetable", {});
   const [editing, setEditing] = useState(null);
@@ -1301,8 +1625,11 @@ function Timetable() {
     type: "lecture",
   });
 
-  const cellKey = (d, h) => `${d}_${h}`;
-  const getCell = (d, h) => schedule[cellKey(d, h)];
+  const cellKey = useCallback((d, h) => `${d}_${h}`, []);
+  const getCell = useCallback(
+    (d, h) => schedule[cellKey(d, h)],
+    [schedule, cellKey],
+  );
 
   const saveCell = () => {
     if (!form.label.trim()) {
@@ -1312,11 +1639,16 @@ function Timetable() {
     setSchedule({ ...schedule, [cellKey(editing.day, editing.hour)]: form });
     setEditing(null);
   };
-  const clearCell = (d, h) => {
-    const s = { ...schedule };
-    delete s[cellKey(d, h)];
-    setSchedule(s);
-  };
+  const clearCell = useCallback(
+    (d, h) => {
+      setSchedule((prev) => {
+        const s = { ...prev };
+        delete s[cellKey(d, h)];
+        return s;
+      });
+    },
+    [cellKey],
+  );
 
   const typeColors = {
     lecture: "#2471a3",
@@ -1350,7 +1682,7 @@ function Timetable() {
           ))}
         </div>
       </div>
-      <div style={{ overflowX: "auto" }}>
+      <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
         <table
           style={{ borderCollapse: "collapse", minWidth: 700, width: "100%" }}
         >
@@ -1405,8 +1737,10 @@ function Timetable() {
                   const cell = getCell(d, h);
                   const subj = SUBJECTS.find((s) => s.id === cell?.subject);
                   return (
-                    <td
+                    <TimetableCell
                       key={d}
+                      cell={cell}
+                      subj={subj}
                       onClick={() => {
                         setEditing({ day: d, hour: h });
                         setForm(
@@ -1417,77 +1751,8 @@ function Timetable() {
                           },
                         );
                       }}
-                      style={{
-                        padding: 3,
-                        verticalAlign: "top",
-                        cursor: "pointer",
-                        position: "relative",
-                      }}
-                    >
-                      {cell ? (
-                        <div
-                          style={{
-                            background: typeColors[cell.type] + "22",
-                            borderRadius: 6,
-                            padding: "4px 6px",
-                            borderLeft: `3px solid ${typeColors[cell.type]}`,
-                            minHeight: 36,
-                            fontSize: 11,
-                            lineHeight: 1.4,
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontWeight: 700,
-                              color: "#e8e0d5",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {cell.label}
-                          </div>
-                          <div style={{ color: "#888", fontSize: 10 }}>
-                            {subj?.icon} {subj?.name}
-                          </div>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              clearCell(d, h);
-                            }}
-                            style={{
-                              position: "absolute",
-                              top: 3,
-                              right: 3,
-                              background: "transparent",
-                              border: "none",
-                              color: "#c0392b",
-                              cursor: "pointer",
-                              fontSize: 12,
-                              lineHeight: 1,
-                              padding: 0,
-                            }}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      ) : (
-                        <div
-                          style={{
-                            borderRadius: 6,
-                            minHeight: 36,
-                            border: "1px dashed rgba(255,255,255,0.05)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: "rgba(255,255,255,0.06)",
-                            fontSize: 16,
-                          }}
-                        >
-                          +
-                        </div>
-                      )}
-                    </td>
+                      onClear={() => clearCell(d, h)}
+                    />
                   );
                 })}
               </tr>
@@ -1495,7 +1760,6 @@ function Timetable() {
           </tbody>
         </table>
       </div>
-
       {editing && (
         <div
           style={{
@@ -1577,9 +1841,72 @@ function Timetable() {
   );
 }
 
-// ─── REMINDERS ────────────────────────────────────────────────────────────────
+// ─── REMINDERS (useReducer) ───────────────────────────────────────────────────
+function remindersReducer(state, action) {
+  switch (action.type) {
+    case "ADD":
+      return [...state, action.payload];
+    case "DISMISS":
+      return state.map((r) =>
+        r.id === action.id ? { ...r, dismissed: true } : r,
+      );
+    case "DELETE":
+      return state.filter((r) => r.id !== action.id);
+    case "MARK_ALERTED":
+      return state.map((r) =>
+        r.id === action.id ? { ...r, alerted: true } : r,
+      );
+    case "RESET_ALERTED_FOR_REPEAT":
+      return state.map((r) => {
+        if (r.id !== action.id || r.repeat === "none") return r;
+        const now = new Date(action.now);
+        let nextDue = new Date(r.time);
+        while (nextDue <= now) {
+          if (r.repeat === "daily") nextDue.setDate(nextDue.getDate() + 1);
+          else if (r.repeat === "weekdays") {
+            nextDue.setDate(nextDue.getDate() + 1);
+            while ([0, 6].includes(nextDue.getDay()))
+              nextDue.setDate(nextDue.getDate() + 1);
+          } else if (r.repeat === "weekly")
+            nextDue.setDate(nextDue.getDate() + 7);
+          else break;
+        }
+        return {
+          ...r,
+          time: nextDue.toISOString().slice(0, 16),
+          alerted: false,
+        };
+      });
+    default:
+      return state;
+  }
+}
+
+function useRemindersLS() {
+  const key = "ms_reminders";
+  const [state, dispatch] = useReducer(remindersReducer, [], () => {
+    try {
+      const s = localStorage.getItem(key);
+      return s ? JSON.parse(s) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Sync to localStorage on every change
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch (e) {
+      console.warn("Reminders save failed:", e);
+    }
+  }, [state]);
+
+  return [state, dispatch];
+}
+
 function Reminders() {
-  const [reminders, setReminders] = useLS("ms_reminders", []);
+  const [reminders, dispatch] = useRemindersLS();
   const [form, setForm] = useState({
     title: "",
     time: "",
@@ -1587,58 +1914,62 @@ function Reminders() {
     subject: "",
     type: "study",
   });
-  const [now, setNow] = useState(new Date());
-  // FIX: track notification permission state reactively
+  const [now, setNow] = useState(Date.now());
   const [notifPerm, setNotifPerm] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "denied",
   );
 
+  // Tick every 30s
   useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 30000);
+    const t = setInterval(() => setNow(Date.now()), 30000);
     return () => clearInterval(t);
   }, []);
 
-  // FIX: safe Notification API usage with try/catch + proper repeat handling
+  // Also check on window focus (critical for mobile where tabs can sleep)
+  useEffect(() => {
+    const onFocus = () => setNow(Date.now());
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Fire notifications
   useEffect(() => {
     if (typeof Notification === "undefined") return;
     reminders.forEach((r) => {
       if (!r.time || r.dismissed || r.alerted) return;
-      const due = new Date(r.time);
-      const diff = (due - now) / 60000;
+      const diff = (new Date(r.time) - now) / 60000;
       if (diff > -1 && diff < 1) {
-        setReminders((rs) =>
-          rs.map((x) => (x.id === r.id ? { ...x, alerted: true } : x)),
-        );
+        dispatch({ type: "MARK_ALERTED", id: r.id });
+        if (r.repeat !== "none")
+          dispatch({ type: "RESET_ALERTED_FOR_REPEAT", id: r.id, now });
         if (Notification.permission === "granted") {
           try {
-            new Notification("📚 MedScholar Reminder", {
-              body: r.title,
-            });
+            new Notification("📚 MedScholar Reminder", { body: r.title });
           } catch (e) {
             console.warn("Notification failed:", e);
           }
         }
       }
     });
-  }, [now]); // FIX: removed reminders from deps to avoid stale closure loop
+  }, [now, reminders]);
 
   const requestNotif = () => {
     if (typeof Notification === "undefined") return;
-    Notification.requestPermission().then((perm) => setNotifPerm(perm));
+    Notification.requestPermission().then((p) => setNotifPerm(p));
   };
 
   const add = () => {
     if (!form.title.trim()) return;
-    setReminders([
-      ...reminders,
-      {
+    dispatch({
+      type: "ADD",
+      payload: {
         id: uid(),
         ...form,
         created: Date.now(),
         dismissed: false,
         alerted: false,
       },
-    ]);
+    });
     setForm({
       title: "",
       time: "",
@@ -1647,12 +1978,6 @@ function Reminders() {
       type: "study",
     });
   };
-
-  const dismiss = (id) =>
-    setReminders((rs) =>
-      rs.map((r) => (r.id === id ? { ...r, dismissed: true } : r)),
-    );
-  const del = (id) => setReminders((rs) => rs.filter((r) => r.id !== id));
 
   const typeIcon = {
     study: "📚",
@@ -1697,7 +2022,6 @@ function Reminders() {
           </button>
         </div>
       )}
-
       <div
         style={{ ...S.card, display: "flex", flexDirection: "column", gap: 10 }}
       >
@@ -1758,7 +2082,6 @@ function Reminders() {
           </button>
         </div>
       </div>
-
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {upcoming.length === 0 && (
           <div style={{ textAlign: "center", color: "#555", padding: 30 }}>
@@ -1845,7 +2168,7 @@ function Reminders() {
               </div>
               <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                 <button
-                  onClick={() => dismiss(r.id)}
+                  onClick={() => dispatch({ type: "DISMISS", id: r.id })}
                   style={{
                     ...S.btn("ghost"),
                     padding: "4px 9px",
@@ -1855,7 +2178,7 @@ function Reminders() {
                   ✓ Done
                 </button>
                 <button
-                  onClick={() => del(r.id)}
+                  onClick={() => dispatch({ type: "DELETE", id: r.id })}
                   style={{
                     ...S.btn("danger"),
                     padding: "4px 9px",
@@ -1873,80 +2196,92 @@ function Reminders() {
   );
 }
 
-// ─── POMODORO TIMER ───────────────────────────────────────────────────────────
+// ─── POMODORO (timestamp-based — survives tab throttling) ─────────────────────
 function Pomodoro() {
   const TIMES = { focus: 25 * 60, short: 5 * 60, long: 15 * 60 };
   const [mode, setMode] = useState("focus");
-  const [secs, setSecs] = useState(TIMES.focus);
   const [running, setRunning] = useState(false);
+  const [remaining, setRemaining] = useState(TIMES.focus);
   const [sessions, setSessions] = useState(0);
   const [target, setTarget] = useState(4);
+  // Timestamp-based: store when the current session started + how many seconds were left at that point
+  const startedAt = useRef(null);
+  const baseRemaining = useRef(TIMES.focus);
   const intv = useRef(null);
-  // FIX: use refs to avoid stale closures in the interval
   const modeRef = useRef("focus");
-  const secsRef = useRef(TIMES.focus);
 
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
-  useEffect(() => {
-    secsRef.current = secs;
-  }, [secs]);
 
-  useEffect(() => {
-    return () => clearInterval(intv.current);
+  const tick = useCallback(() => {
+    if (!startedAt.current) return;
+    const elapsed = (Date.now() - startedAt.current) / 1000;
+    const left = Math.max(0, baseRemaining.current - elapsed);
+    setRemaining(left);
+    if (left <= 0) {
+      clearInterval(intv.current);
+      setRunning(false);
+      startedAt.current = null;
+      if (modeRef.current === "focus") setSessions((n) => n + 1);
+      if (
+        typeof Notification !== "undefined" &&
+        Notification.permission === "granted"
+      ) {
+        try {
+          new Notification("⏰ Timer Complete!", {
+            body:
+              modeRef.current === "focus"
+                ? "Great work! Take a break."
+                : "Break over. Back to study!",
+          });
+        } catch (e) {}
+      }
+    }
   }, []);
 
-  // FIX: single effect for running state, using ref for mode to avoid stale closure
   useEffect(() => {
     if (running) {
-      intv.current = setInterval(() => {
-        setSecs((s) => {
-          if (s <= 1) {
-            clearInterval(intv.current);
-            setRunning(false);
-            if (modeRef.current === "focus") setSessions((n) => n + 1);
-            if (
-              typeof Notification !== "undefined" &&
-              Notification.permission === "granted"
-            ) {
-              try {
-                new Notification("⏰ Timer Complete!", {
-                  body:
-                    modeRef.current === "focus"
-                      ? "Great work! Take a break."
-                      : "Break over. Back to study!",
-                });
-              } catch (e) {}
-            }
-            return 0;
-          }
-          return s - 1;
-        });
-      }, 1000);
+      startedAt.current = Date.now();
+      baseRemaining.current = remaining;
+      intv.current = setInterval(tick, 500); // 500ms for accuracy without battery drain
     } else {
       clearInterval(intv.current);
+      startedAt.current = null;
     }
     return () => clearInterval(intv.current);
   }, [running]);
 
-  // FIX: switchMode is clean — just update mode and reset secs, no redundancy
+  // Re-sync when tab regains focus (handles throttled tabs)
+  useEffect(() => {
+    const onFocus = () => {
+      if (running) tick();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [running, tick]);
+
   const switchMode = (m) => {
     clearInterval(intv.current);
     setRunning(false);
     setMode(m);
-    setSecs(TIMES[m]);
+    setRemaining(TIMES[m]);
+    baseRemaining.current = TIMES[m];
+    startedAt.current = null;
   };
 
   const reset = () => {
     clearInterval(intv.current);
     setRunning(false);
-    setSecs(TIMES[mode]);
+    setRemaining(TIMES[mode]);
+    baseRemaining.current = TIMES[mode];
+    startedAt.current = null;
   };
 
+  const secs = Math.ceil(remaining);
   const mm = String(Math.floor(secs / 60)).padStart(2, "0");
   const ss = String(secs % 60).padStart(2, "0");
-  const pct = (1 - secs / TIMES[mode]) * 100;
+  const pct = (1 - remaining / TIMES[mode]) * 100;
 
   return (
     <div
@@ -1957,7 +2292,14 @@ function Pomodoro() {
         gap: 20,
       }}
     >
-      <div style={{ display: "flex", gap: 8 }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          flexWrap: "wrap",
+          justifyContent: "center",
+        }}
+      >
         {[
           ["focus", "Focus 25m"],
           ["short", "Short Break 5m"],
@@ -1972,7 +2314,6 @@ function Pomodoro() {
           </button>
         ))}
       </div>
-
       <div style={{ position: "relative", width: 200, height: 200 }}>
         <svg
           width={200}
@@ -2002,7 +2343,7 @@ function Pomodoro() {
             strokeLinecap="round"
             strokeDasharray={`${2 * Math.PI * 88}`}
             strokeDashoffset={`${2 * Math.PI * 88 * (1 - pct / 100)}`}
-            style={{ transition: "stroke-dashoffset 1s linear" }}
+            style={{ transition: "stroke-dashoffset 0.5s linear" }}
           />
         </svg>
         <div
@@ -2039,7 +2380,6 @@ function Pomodoro() {
           </div>
         </div>
       </div>
-
       <div style={{ display: "flex", gap: 12 }}>
         <button
           onClick={() => setRunning((r) => !r)}
@@ -2054,7 +2394,6 @@ function Pomodoro() {
           ↺ Reset
         </button>
       </div>
-
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         {Array.from({ length: target }).map((_, i) => (
           <div
@@ -2072,7 +2411,11 @@ function Pomodoro() {
           {sessions}/{target} sessions
         </span>
       </div>
-
+      {sessions >= target && target > 0 && (
+        <span style={{ fontSize: 12, color: "#1e8449", fontWeight: 700 }}>
+          🎯 Daily goal reached!
+        </span>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 12, color: "#666" }}>Daily target:</span>
         <input
@@ -2086,11 +2429,102 @@ function Pomodoro() {
           style={{ ...S.input, width: 60, textAlign: "center" }}
         />
         <span style={{ fontSize: 12, color: "#666" }}>sessions</span>
-        {sessions >= target && target > 0 && (
-          <span style={{ fontSize: 12, color: "#1e8449", fontWeight: 700 }}>
-            🎯 Goal reached!
-          </span>
-        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── BACKUP PANEL ─────────────────────────────────────────────────────────────
+function BackupPanel() {
+  const [status, setStatus] = useState(null);
+  const fileRef = useRef(null);
+
+  const doImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const count = await importBackup(file);
+      setStatus({
+        ok: true,
+        msg: `✅ Restored ${count} items. Reload the page to see changes.`,
+      });
+    } catch (err) {
+      setStatus({ ok: false, msg: `❌ Import failed: ${err.message}` });
+    }
+    e.target.value = "";
+  };
+
+  return (
+    <div
+      style={{ ...S.card, display: "flex", flexDirection: "column", gap: 12 }}
+    >
+      <div style={S.sectionTitle}>Backup & Restore</div>
+      <div style={{ fontSize: 13, color: "#888", lineHeight: 1.6 }}>
+        Export all your notes, flashcards, slides, tasks, timetable and
+        reminders as a single JSON file. Import it later to restore everything.
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button
+          onClick={exportBackup}
+          style={{ ...S.btn(), display: "flex", alignItems: "center", gap: 6 }}
+        >
+          ⬇ Export Backup
+        </button>
+        <button
+          onClick={() => fileRef.current?.click()}
+          style={{
+            ...S.btn("ghost"),
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          ⬆ Import Backup
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".json"
+          onChange={doImport}
+          style={{ display: "none" }}
+        />
+      </div>
+      {status && (
+        <div
+          style={{
+            fontSize: 13,
+            color: status.ok ? "#1e8449" : "#c0392b",
+            background: (status.ok ? "#1e8449" : "#c0392b") + "18",
+            borderRadius: 8,
+            padding: "8px 12px",
+          }}
+        >
+          {status.msg}
+          {status.ok && (
+            <button
+              onClick={() => location.reload()}
+              style={{
+                ...S.btn(),
+                marginLeft: 12,
+                padding: "3px 10px",
+                fontSize: 12,
+              }}
+            >
+              Reload Now
+            </button>
+          )}
+        </div>
+      )}
+      <div
+        style={{
+          fontSize: 11,
+          color: "#444",
+          borderTop: "1px solid rgba(255,255,255,0.06)",
+          paddingTop: 10,
+        }}
+      >
+        Schema v{SCHEMA_VERSION} · Data stored locally in browser (localStorage
+        + IndexedDB for drawings)
       </div>
     </div>
   );
@@ -2099,18 +2533,21 @@ function Pomodoro() {
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({ setView, setActiveSubject }) {
   const [tasks] = useLS("tasks_global", []);
-  const [reminders] = useLS("ms_reminders", []);
-  const [now] = useState(new Date());
-  const upcomingReminders = reminders
+  const [schedule] = useLS("ms_timetable", {});
+  const [remindersRaw] = useLS("ms_reminders", []);
+  const now = new Date();
+  const upcomingReminders = remindersRaw
     .filter((r) => !r.dismissed && r.time && new Date(r.time) > now)
     .slice(0, 3);
   const pendingTasks = tasks.filter((t) => !t.done);
   const todayDay = DAYS[now.getDay() === 0 ? 6 : now.getDay() - 1];
-  const [schedule] = useLS("ms_timetable", {});
   const todaySessions = HOURS.map((h) => ({
     h,
     cell: schedule[`${todayDay}_${h}`],
   })).filter((x) => x.cell);
+  const overdueReminders = remindersRaw.filter(
+    (r) => !r.dismissed && r.time && new Date(r.time) < now,
+  ).length;
 
   const hour = now.getHours();
   const greeting =
@@ -2178,9 +2615,9 @@ function Dashboard({ setView, setActiveSubject }) {
           },
           {
             icon: "🔔",
-            label: "Upcoming Reminders",
-            value: upcomingReminders.length,
-            color: "#2471a3",
+            label: overdueReminders > 0 ? "⚠️ Overdue!" : "Upcoming",
+            value: upcomingReminders.length + overdueReminders,
+            color: overdueReminders > 0 ? "#c0392b" : "#2471a3",
           },
           {
             icon: "📅",
@@ -2301,11 +2738,12 @@ function Dashboard({ setView, setActiveSubject }) {
             style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
           >
             {[
-              { l: "📅 Timetable", v: "timetable" },
-              { l: "🔔 Reminders", v: "reminders" },
-              { l: "⏱ Pomodoro", v: "pomodoro" },
-              { l: "✅ Global Tasks", v: "tasks_global" },
-            ].map(({ l, v }) => (
+              ["📅 Timetable", "timetable"],
+              ["🔔 Reminders", "reminders"],
+              ["⏱ Pomodoro", "pomodoro"],
+              ["✅ Global Tasks", "tasks_global"],
+              ["💾 Backup", "backup"],
+            ].map(([l, v]) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
@@ -2366,10 +2804,10 @@ function Dashboard({ setView, setActiveSubject }) {
 function SubjectView({ subjectId }) {
   const subj = SUBJECTS.find((s) => s.id === subjectId);
   const [chapters, setChapters] = useLS("chapters_" + subjectId, []);
-  // FIX: activeChap stores a string ID, not an object
-  const [activeChap, setActiveChap] = useState(null);
+  const [activeChap, setActiveChap] = useState(null); // string ID
   const [newChap, setNewChap] = useState("");
   const [activeTool, setActiveTool] = useState("notes");
+  const [dupError, setDupError] = useState(false);
 
   const TOOLS = [
     { id: "notes", l: "📝 Notes" },
@@ -2379,7 +2817,6 @@ function SubjectView({ subjectId }) {
     { id: "tasks", l: "✅ Tasks" },
   ];
 
-  // FIX: removed erroneous subj.chapters reference — just check local chapters list
   const addChapter = () => {
     if (!newChap.trim()) return;
     if (
@@ -2387,7 +2824,6 @@ function SubjectView({ subjectId }) {
         (c) => c.name.toLowerCase() === newChap.trim().toLowerCase(),
       )
     ) {
-      // Use a gentle inline state instead of alert() for better UX
       setDupError(true);
       setTimeout(() => setDupError(false), 2000);
       return;
@@ -2395,19 +2831,15 @@ function SubjectView({ subjectId }) {
     const c = { id: uid(), name: newChap.trim() };
     setChapters([...chapters, c]);
     setNewChap("");
-    setActiveChap(c.id); // FIX: store the ID string, not the object
+    setActiveChap(c.id);
   };
-  const [dupError, setDupError] = useState(false);
 
   const delChapter = (id) => {
     setChapters(chapters.filter((c) => c.id !== id));
     if (activeChap === id) setActiveChap(null);
   };
 
-  // FIX: look up chapter by ID string
   const chap = chapters.find((c) => c.id === activeChap);
-
-  // Reset active tool when chapter changes
   useEffect(() => {
     setActiveTool("notes");
   }, [activeChap]);
@@ -2445,7 +2877,7 @@ function SubjectView({ subjectId }) {
           </button>
         </div>
         {dupError && (
-          <div style={{ fontSize: 11, color: "#c0392b", marginTop: -4 }}>
+          <div style={{ fontSize: 11, color: "#c0392b" }}>
             Chapter already exists
           </div>
         )}
@@ -2455,7 +2887,7 @@ function SubjectView({ subjectId }) {
             style={{ display: "flex", alignItems: "center", gap: 4 }}
           >
             <button
-              onClick={() => setActiveChap(c.id)} // FIX: set string ID
+              onClick={() => setActiveChap(c.id)}
               style={{
                 ...S.navBtn(activeChap === c.id),
                 borderLeft: `3px solid ${activeChap === c.id ? subj?.color : "transparent"}`,
@@ -2486,7 +2918,7 @@ function SubjectView({ subjectId }) {
                 padding: "4px",
                 flexShrink: 0,
               }}
-              title="Delete chapter"
+              title="Delete"
             >
               ×
             </button>
@@ -2515,7 +2947,7 @@ function SubjectView({ subjectId }) {
           gap: 12,
         }}
       >
-        {!activeChap || !chap ? (
+        {!chap ? (
           <div
             style={{
               ...S.card,
@@ -2574,16 +3006,11 @@ function SubjectView({ subjectId }) {
               ))}
               <button
                 onClick={() => {
-                  // FIX: use chap.name not activeChap.id
-                  const prompt = `You are an expert MBBS tutor.\n\nSubject: ${subj?.name}\nChapter: ${chap.name}\n\nPlease explain clearly for an MBBS student.\n\nInclude:\n- Conceptual understanding\n- High yield exam points\n- Mnemonics\n- Clinical relevance\n- Viva questions\n\nQuestion: `;
+                  const prompt = `You are an expert MBBS tutor.\n\nSubject: ${subj?.name}\nChapter: ${chap.name}\n\nPlease explain clearly for an MBBS student. Include conceptual understanding, high yield exam points, mnemonics, clinical relevance, and viva questions.\n\nQuestion: `;
                   navigator.clipboard
                     .writeText(prompt)
-                    .then(() => {
-                      window.open("https://claude.ai", "_blank");
-                    })
-                    .catch(() => {
-                      window.open("https://claude.ai", "_blank");
-                    });
+                    .catch(() => {})
+                    .finally(() => window.open("https://claude.ai", "_blank"));
                 }}
                 style={{ ...S.btn("ghost"), padding: "5px 12px", fontSize: 12 }}
               >
@@ -2591,22 +3018,23 @@ function SubjectView({ subjectId }) {
               </button>
             </div>
             <div style={{ flex: 1 }}>
-              {/* FIX: pass activeChap (string ID) directly, not activeChap.id */}
-              {activeTool === "notes" && (
-                <NoteEditor noteKey={subjectId + "_" + activeChap} />
-              )}
-              {activeTool === "draw" && (
-                <DrawCanvas saveKey={subjectId + "_" + activeChap} />
-              )}
-              {activeTool === "fc" && (
-                <Flashcards storeKey={subjectId + "_" + activeChap} />
-              )}
-              {activeTool === "slides" && (
-                <SlidesBuilder storeKey={subjectId + "_" + activeChap} />
-              )}
-              {activeTool === "tasks" && (
-                <Tasks storeKey={subjectId + "_" + activeChap} />
-              )}
+              <ErrorBoundary>
+                {activeTool === "notes" && (
+                  <NoteEditor noteKey={subjectId + "_" + activeChap} />
+                )}
+                {activeTool === "draw" && (
+                  <DrawCanvas saveKey={subjectId + "_" + activeChap} />
+                )}
+                {activeTool === "fc" && (
+                  <Flashcards storeKey={subjectId + "_" + activeChap} />
+                )}
+                {activeTool === "slides" && (
+                  <SlidesBuilder storeKey={subjectId + "_" + activeChap} />
+                )}
+                {activeTool === "tasks" && (
+                  <Tasks storeKey={subjectId + "_" + activeChap} />
+                )}
+              </ErrorBoundary>
             </div>
           </>
         )}
@@ -2616,18 +3044,34 @@ function SubjectView({ subjectId }) {
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ErrorBoundary needs React in scope — import it
+import React from "react";
+
 export default function App() {
   const [view, setView] = useState("dashboard");
   const [activeSubject, setActiveSubject] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  // FIX: reactive mobile detection via state + resize listener
   const [isMobile, setIsMobile] = useState(window.innerWidth < 600);
+  // Mobile keyboard viewport fix
+  const [kbOffset, setKbOffset] = useState(0);
 
   useEffect(() => {
-    const handler = () => setIsMobile(window.innerWidth < 600);
-    window.addEventListener("resize", handler);
-    return () => window.removeEventListener("resize", handler);
+    const onResize = () => setIsMobile(window.innerWidth < 600);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // Detect keyboard on mobile using visualViewport
+  useEffect(() => {
+    if (!window.visualViewport) return;
+    const onViewport = () => {
+      const gap = window.innerHeight - window.visualViewport.height;
+      setKbOffset(gap > 100 ? gap : 0);
+    };
+    window.visualViewport.addEventListener("resize", onViewport);
+    return () =>
+      window.visualViewport.removeEventListener("resize", onViewport);
   }, []);
 
   const NAV = [
@@ -2636,6 +3080,7 @@ export default function App() {
     { id: "reminders", l: "🔔 Reminders" },
     { id: "pomodoro", l: "⏱ Pomodoro" },
     { id: "tasks_global", l: "✅ All Tasks" },
+    { id: "backup", l: "💾 Backup" },
   ];
 
   const navClick = (v) => {
@@ -2721,7 +3166,7 @@ export default function App() {
   );
 
   return (
-    <div style={S.app}>
+    <div style={{ ...S.app, paddingBottom: kbOffset }}>
       <style>{`
         * { box-sizing: border-box; }
         ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -2729,9 +3174,10 @@ export default function App() {
         ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
         [contenteditable][data-placeholder]:empty:before { content: attr(data-placeholder); color: #999; pointer-events: none; }
         input[type=datetime-local]::-webkit-calendar-picker-indicator { filter: invert(0.5); }
-        button:hover { filter: brightness(1.1); }
-        button:active { transform: scale(0.98); }
+        button:hover { filter: brightness(1.12); }
+        button:active { transform: scale(0.97); }
         @media (max-width:600px) { .desktop-sidebar { display: none !important; } }
+        select option { background: #1e2430; color: #e8e0d5; }
       `}</style>
 
       <div style={S.topBar}>
@@ -2757,23 +3203,14 @@ export default function App() {
         </div>
         <div style={{ flex: 1 }} />
         {view === "subject" && activeSubject && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontSize: 13,
-            }}
+          <span
+            style={S.badge(
+              SUBJECTS.find((s) => s.id === activeSubject)?.color || "#666",
+            )}
           >
-            <span
-              style={S.badge(
-                SUBJECTS.find((s) => s.id === activeSubject)?.color || "#666",
-              )}
-            >
-              {SUBJECTS.find((s) => s.id === activeSubject)?.icon}{" "}
-              {SUBJECTS.find((s) => s.id === activeSubject)?.name}
-            </span>
-          </div>
+            {SUBJECTS.find((s) => s.id === activeSubject)?.icon}{" "}
+            {SUBJECTS.find((s) => s.id === activeSubject)?.name}
+          </span>
         )}
         <div
           style={{
@@ -2793,7 +3230,7 @@ export default function App() {
               display: "inline-block",
             }}
           />
-          v2.0
+          v3.0
         </div>
       </div>
 
@@ -2865,37 +3302,43 @@ export default function App() {
         </div>
 
         <main style={S.main}>
-          {view === "dashboard" && (
-            <Dashboard setView={setView} setActiveSubject={setActiveSubject} />
-          )}
-          {view === "timetable" && <Timetable />}
-          {view === "reminders" && <Reminders />}
-          {view === "pomodoro" && (
-            <div
-              style={{
-                ...S.card,
-                maxWidth: 400,
-                margin: "0 auto",
-                width: "100%",
-              }}
-            >
+          <ErrorBoundary>
+            {view === "dashboard" && (
+              <Dashboard
+                setView={setView}
+                setActiveSubject={setActiveSubject}
+              />
+            )}
+            {view === "timetable" && <Timetable />}
+            {view === "reminders" && <Reminders />}
+            {view === "pomodoro" && (
               <div
                 style={{
-                  fontSize: 16,
-                  fontWeight: 700,
-                  marginBottom: 20,
-                  textAlign: "center",
+                  ...S.card,
+                  maxWidth: 400,
+                  margin: "0 auto",
+                  width: "100%",
                 }}
               >
-                ⏱ Pomodoro Timer
+                <div
+                  style={{
+                    fontSize: 16,
+                    fontWeight: 700,
+                    marginBottom: 20,
+                    textAlign: "center",
+                  }}
+                >
+                  ⏱ Pomodoro Timer
+                </div>
+                <Pomodoro />
               </div>
-              <Pomodoro />
-            </div>
-          )}
-          {view === "tasks_global" && <Tasks storeKey="global" />}
-          {view === "subject" && activeSubject && (
-            <SubjectView subjectId={activeSubject} />
-          )}
+            )}
+            {view === "tasks_global" && <Tasks storeKey="global" />}
+            {view === "backup" && <BackupPanel />}
+            {view === "subject" && activeSubject && (
+              <SubjectView subjectId={activeSubject} />
+            )}
+          </ErrorBoundary>
         </main>
       </div>
     </div>
