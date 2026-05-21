@@ -2005,203 +2005,6 @@ function Pomodoro() {
 }
 
 // ─── AI ASSIST ────────────────────────────────────────────────────────────────
-function AIAssist({ subject, chapter }) {
-  const [msgs, setMsgs] = useLS("ai_chat_" + subject + "_" + chapter, []);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const endRef = useRef(null);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [msgs]);
-
-  const send = async () => {
-    const q = input.trim();
-    if (!q || loading) return;
-    setInput("");
-    setLoading(true);
-    const subj = SUBJECTS.find((s) => s.id === subject);
-    const newMsgs = [...msgs, { role: "user", content: q }];
-    setMsgs(newMsgs);
-
-    try {
-      const sysPrompt = `You are MedScholar AI, a knowledgeable and concise medical education assistant for MBBS students. You specialize in ${subj?.name || "medicine"}${chapter ? " particularly the topic: " + chapter : ""}. Give clear, clinically relevant answers. Use mnemonics, bullet points, and clinical pearls where helpful. Keep answers focused and exam-oriented.`;
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: sysPrompt,
-          messages: newMsgs.map((m) => ({ role: m.role, content: m.content })),
-        }),
-      });
-      const data = await res.json();
-      const reply =
-        data.content?.map((b) => b.text || "").join("") ||
-        "Sorry, I couldn't respond.";
-      setMsgs([...newMsgs, { role: "assistant", content: reply }]);
-    } catch {
-      setMsgs([
-        ...newMsgs,
-        {
-          role: "assistant",
-          content: "⚠️ Connection error. Please try again.",
-        },
-      ]);
-    }
-    setLoading(false);
-  };
-
-  const suggestions = [
-    "Explain this topic simply",
-    "Give me a mnemonic",
-    "What are the key clinical features?",
-    "Common exam questions on this?",
-    "Differentiate the key concepts",
-  ];
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        gap: 10,
-      }}
-    >
-      <div
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-          minHeight: 240,
-          maxHeight: 400,
-        }}
-      >
-        {msgs.length === 0 && (
-          <div style={{ textAlign: "center", padding: 30 }}>
-            <div style={{ fontSize: 36, marginBottom: 10 }}>🤖</div>
-            <div style={{ color: "#888", fontSize: 14, marginBottom: 20 }}>
-              Ask me anything about{" "}
-              {SUBJECTS.find((s) => s.id === subject)?.name || "medicine"}
-              {chapter ? " — " + chapter : ""}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 8,
-                justifyContent: "center",
-              }}
-            >
-              {suggestions.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => {
-                    setInput(s);
-                  }}
-                  style={{
-                    ...S.btn("ghost"),
-                    fontSize: 12,
-                    padding: "6px 12px",
-                  }}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {msgs.map((m, i) => (
-          <div
-            key={i}
-            style={{
-              display: "flex",
-              justifyContent: m.role === "user" ? "flex-end" : "flex-start",
-            }}
-          >
-            <div
-              style={{
-                maxWidth: "85%",
-                background:
-                  m.role === "user" ? "rgba(192,57,43,0.2)" : "#1e2430",
-                borderRadius:
-                  m.role === "user"
-                    ? "14px 14px 2px 14px"
-                    : "14px 14px 14px 2px",
-                padding: "10px 14px",
-                fontSize: 13,
-                lineHeight: 1.7,
-                border:
-                  m.role === "user"
-                    ? "1px solid rgba(192,57,43,0.3)"
-                    : "1px solid rgba(255,255,255,0.06)",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {m.content}
-            </div>
-          </div>
-        ))}
-        {loading && (
-          <div
-            style={{
-              display: "flex",
-              gap: 6,
-              padding: "10px 14px",
-              background: "#1e2430",
-              borderRadius: 14,
-              width: "fit-content",
-              border: "1px solid rgba(255,255,255,0.06)",
-            }}
-          >
-            {[0, 1, 2].map((i) => (
-              <div
-                key={i}
-                style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: "50%",
-                  background: "#c0392b",
-                  animation: `bounce 1.2s ${i * 0.2}s infinite`,
-                }}
-              />
-            ))}
-          </div>
-        )}
-        <div ref={endRef} />
-      </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about anatomy, physiology, pharmacology..."
-          style={{ ...S.input, flex: 1 }}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-        />
-        <button
-          onClick={send}
-          disabled={loading || !input.trim()}
-          style={{ ...S.btn(), opacity: loading || !input.trim() ? 0.5 : 1 }}
-        >
-          Send
-        </button>
-        {msgs.length > 0 && (
-          <button
-            onClick={() => setMsgs([])}
-            style={{ ...S.btn("ghost"), padding: "9px 12px" }}
-          >
-            🗑
-          </button>
-        )}
-      </div>
-      <style>{`@keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}`}</style>
-    </div>
-  );
-}
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({ setView, setActiveSubject, setActiveTool }) {
@@ -2482,7 +2285,6 @@ function SubjectView({ subjectId }) {
     { id: "fc", l: "🃏 Flashcards" },
     { id: "slides", l: "🖥️ Slides" },
     { id: "tasks", l: "✅ Tasks" },
-    { id: "ai", l: "🤖 AI Assist" },
   ];
 
   const addChapter = () => {
@@ -2623,6 +2425,38 @@ function SubjectView({ subjectId }) {
                   {t.l}
                 </button>
               ))}
+              <button
+                onClick={() => {
+                  const prompt = `
+You are an expert MBBS tutor.
+
+Subject: ${subj?.name}
+Chapter: ${chap?.name || "General"}
+
+Please explain clearly for an MBBS student.
+
+Include:
+- conceptual understanding
+- high yield exam points
+- mnemonics
+- clinical relevance
+- viva questions
+
+Question:
+`;
+
+                  navigator.clipboard.writeText(prompt);
+
+                  window.open("https://claude.ai", "_blank");
+                }}
+                style={{
+                  ...S.btn("ghost"),
+                  padding: "5px 12px",
+                  fontSize: 12,
+                }}
+              >
+                🤖 Open in Claude
+              </button>
             </div>
             <div style={{ flex: 1 }}>
               {activeTool === "notes" && (
@@ -2639,9 +2473,6 @@ function SubjectView({ subjectId }) {
               )}
               {activeTool === "tasks" && (
                 <Tasks storeKey={subjectId + "_" + activeChap} />
-              )}
-              {activeTool === "ai" && (
-                <AIAssist subject={subjectId} chapter={chap?.name} />
               )}
             </div>
           </>
